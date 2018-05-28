@@ -1,52 +1,12 @@
-﻿# Current Version contains
-# Support for 2-4 extruders
-# Initial Flow for raft or anything before affected layers
-# First part of modifiers so future options can be added easier (needs work)
-# Modifiers Part 1. base_input - allowing it to be easier to add a wood texture modifier and heart beat modifier
-# Modifiers Part 2. change_rate - allowing random distances between changes for wood texture
-# Fixed duplicate 0:1:0, 0:1:0:0, and 0:0:1:0 showing up
-# Abandoned Overflow until able to prove its useful
-# Re-enabled the initiate_extruder function
-# Ability to choose what color the print ends with after adjusted layers
-# Added debug reporting to gcode file for troubleshooting user problems that may arise
-# Ability to set the initial extruder rate and not shift through the print by setting change rate to 0
-# Pattern Modifier added (Heartbeat)
-# Split Rate Modifiers from Modifiers to add versatility
-# Allowed for multiple runs of the script (this allows you to shift 1:0 > 0:1 for the first 20% of the print and then shift 0:1 > 1:0 for the last 20%)
-# Enabled ability to wrap the shift back to the beginning nozzle with user input circular or linear
-# Added Slope Modifier
-# Added Ellipse Modifier
-# Added Lerp Modifier
-# Changed Initial extruder code to allow user to make adjustments
-
-# Current Bugs
-# duplicate values when running multiple scripts that overlap affected areas
-# Its possible to enter non numeral values for initial and final extruder values  but non numerals would break the code
-
-# Future Updates
-# More Modifiers (exponential, logarithmic)
-
-# Credits for contributions
-# gargansa, bass4aj, kenix, laraeb, datadink, keyreaper
 
 from ..Script import Script
 import random
+import re
 
 
 # Convenience function for gargansa's coding familiarity
 def clamp(value, minimum, maximum):
     return max(minimum, min(value, maximum))
-
-
-# Function to compile the initial setup into a string
-def initiate_extruder(existing_gcode, *gcode):
-    setup_line = ""
-    setup_line += existing_gcode
-    for line in gcode:
-        if line != str(""):
-            setup_line += "\n" + str(line) #+ "\n"
-
-    return setup_line
 
 
 # Function to compile extruder info into a string
@@ -72,7 +32,7 @@ def print_debug(*report_data):
 
 
 class Melt(Script):
-    version = "3.4.0"
+    version = "4.0.0"
 
     def __init__(self):
         super().__init__()
@@ -96,23 +56,39 @@ class Melt(Script):
                 "qty_extruders":
                 {
                     "label": "Number of extruders",
-                    "description": "How many extruders in mixing nozzle.",
+                    "description": "How many total extruders in mixing nozzle.",
                     "type": "enum",
                     "options": {"2":"Two","3":"Three","4":"Four"},
                     "default_value": "2"
                 },
-                "a_trigger":
+                "affected_tool":
                 {
-                    "label": "Shifting Clamp Type",
-                    "description": "Begin and end shifting at percentage or layer.",
+                    "label": "Tool Affected",
+                    "description": "Which Tool(Part) to Apply Color or Effect.",
+                    "type": "enum",
+                    "options": {"0":"All","1":"Tool 1","2":"Tool 2","3":"Tool 3","4":"Tool 4","5":"Tool 5","6":"Tool 6","7":"Tool 7","8":"Tool 8","9":"Tool 9","10":"Tool 10","11":"Tool 11","12":"Tool 12","13":"Tool 13","14":"Tool 14","15":"Tool 15"},
+                    "default_value": "0"
+                },
+                "effect_type":
+                {
+                    "label": "Blend or Effect",
+                    "description": "Choose whether to apply a stationary blend to the tool or a changing effect such as a gradient",
+                    "type": "enum",
+                    "options": {"blend":"Define Blend","effect":"Changing Effect"},
+                    "default_value": "blend"
+                },
+                "unit_type":
+                {
+                    "label": "Unit Type",
+                    "description": "Percentage or Layer Unit.",
                     "type": "enum",
                     "options": {"percent":"Percentage","layer_no":"Layer No."},
                     "default_value": "percent"
                 },
                 "percent_change_start":
                 {
-                    "label": "Extrusion % Start",
-                    "description": "Percentage of layer height to start shifting extruder percentage.",
+                    "label": "Location % Start",
+                    "description": "Percentage location of layer height to begin effect.",
                     "unit": "%",
                     "type": "float",
                     "default_value": 0,
@@ -124,8 +100,8 @@ class Melt(Script):
                 },
                 "percent_change_end":
                 {
-                    "label": "Extrusion % End",
-                    "description": "Percentage of layer height to stop shifting extruder percentage.",
+                    "label": "Location % End",
+                    "description": "Percentage location of layer height to end effect.",
                     "unit": "%",
                     "type": "float",
                     "default_value": 100,
@@ -133,12 +109,12 @@ class Melt(Script):
                     "maximum_value": "100",
                     "minimum_value_warning": "1",
                     "maximum_value_warning": "100",
-                    "enabled": "a_trigger == 'percent'"
+                    "enabled": "a_trigger == 'percent' and effect_type == 'effect'"
                 },
                 "layer_change_start":
                 {
-                    "label": "Extrusion # Start",
-                    "description": "Layer to start shifting extruder percentage.",
+                    "label": "Location # Start",
+                    "description": "Layer location to begin effect.",
                     "unit": "#",
                     "type": "int",
                     "default_value": 0,
@@ -147,57 +123,133 @@ class Melt(Script):
                 },
                 "layer_change_end":
                 {
-                    "label": "Extrusion # End",
-                    "description": "Layer to stop changing extruder percentage. If layer is more then total layers the max layer will be chosen.",
+                    "label": "Location # End",
+                    "description": "Layer location to end effect.",
                     "unit": "#",
                     "type": "int",
                     "default_value": 100000,
                     "minimum_value": "0",
-                    "enabled": "a_trigger == 'layer_no'"
+                    "enabled": "a_trigger == 'layer_no' and effect_type == 'effect'"
                 },
-                "b_trigger":
+                "blend_values":
+                {
+                    "label": "Values",
+                    "description": "What percentage values to set the extruder blend. Must add up to 100%",
+                    "type": "str",
+                    "default_value": "100,0,0,0",
+                    "enabled": "effect_type == 'blend'"
+                },
+                "rotation_order":
                 {
                     "label": "Extruder Rotation",
-                    "description": "The order in which the shift moves through the extruders.",
-                    "type": "enum",
-                    "options": {"normal":"Normal","reversed":"Reversed"},
-                    "default_value": "normal"
+                    "description": "The order in which the shift moves through the extruders. Example 'ca' starts the shift at extruder c and moves towards extruder a. If only shifting through two layers list only those two. Must be lowercase. Must be at least two letters or it will default to ab",
+                    "type": "str",
+                    "default_value": "abcd",
+                    "enabled": "effect_type == 'effect'"
+                },
+                "extruder_a_start":
+                {
+                    "label": "Extruder A begin clamp",
+                    "description": "The beginning percentage to start extruder a.",
+                    "type": "float",
+                    "default_value": 0,
+                    "enabled": "'a' or in rotation_order and effect_type == 'effect'"
+                },
+                "extruder_a_end":
+                {
+                    "label": "Extruder A end clamp",
+                    "description": "The ending percentage to start extruder a.",
+                    "type": "float",
+                    "default_value": 100,
+                    "enabled": "'a' in rotation_order and effect_type == 'effect'"
+                },
+                "extruder_b_start":
+                {
+                    "label": "Extruder B begin clamp",
+                    "description": "The beginning percentage to start extruder b.",
+                    "type": "float",
+                    "default_value": 0,
+                    "enabled": "'b' in rotation_order and effect_type == 'effect'"
+                },
+                "extruder_b_end":
+                {
+                    "label": "Extruder B end clamp",
+                    "description": "The ending percentage to start extruder b.",
+                    "type": "float",
+                    "default_value": 100,
+                    "enabled": "'b' in rotation_order and effect_type == 'effect'"
+                },
+                "extruder_c_start":
+                {
+                    "label": "Extruder C begin clamp",
+                    "description": "The beginning percentage to start extruder c.",
+                    "type": "float",
+                    "default_value": 0,
+                    "enabled": "'c' in rotation_order and effect_type == 'effect'"
+                },
+                "extruder_c_end":
+                {
+                    "label": "Extruder C end clamp",
+                    "description": "The ending percentage to start extruder c.",
+                    "type": "float",
+                    "default_value": 100,
+                    "enabled": "'c' in rotation_order and effect_type == 'effect'"
+                },
+                "extruder_d_start":
+                {
+                    "label": "Extruder D begin clamp",
+                    "description": "The beginning percentage to start extruder d.",
+                    "type": "float",
+                    "default_value": 0,
+                    "enabled": "'d' in rotation_order and effect_type == 'effect'"
+                },
+                "extruder_d_end":
+                {
+                    "label": "Extruder D end clamp",
+                    "description": "The ending percentage to start extruder d.",
+                    "type": "float",
+                    "default_value": 100,
+                    "enabled": "'d' in rotation_order and effect_type == 'effect'"
                 },
                 "change_rate":
                 {
-                    "label": "Shift frequency",
-                    "description": "How many layers until the color is shifted each time. Setting to 0 Allows the initial rate to be set only.",
+                    "label": "Effect Change frequency",
+                    "description": "How many layers until the color is shifted each time.",
                     "unit": "#",
                     "type": "int",
                     "default_value": 4,
                     "minimum_value": "0",
                     "maximum_value": "1000",
                     "minimum_value_warning": "1",
-                    "maximum_value_warning": "100"
+                    "maximum_value_warning": "100",
+                    "enabled": "effect_type == 'effect'"
                 },
-                "c_trigger":
+                "loop_type":
                 {
-                    "label": "Shift Loop Type",
+                    "label": "Effect Loop Type",
                     "description": "::Linear: Start with primary extruder finish with last extruder. ::Circular: Start with primary extruder shift through to last extruder and then shift back to primary extruder",
                     "type": "enum",
                     "options": {"1":"Linear","0":"Circular"},
-                    "default_value": "1"
+                    "default_value": "1",
+                    "enabled": "effect_type == 'effect'"
                 },
-                "e_trigger":
+                "effect_modifier":
                 {
                     "label": "Modifier Type",
                     "description": "::Normal: Sets the shift to change gradually throughout the length of the layers within the clamp. ::Wood Texture: Sets one extruder at a random small percentage and adjusts change frequency by a random amount, simulating wood grain. ::Repeating Pattern: Repeats a set extruder pattern throughout the print. ",
                     "type": "enum",
                     "options": {"normal":"Normal", "wood":"Wood Texture", "pattern":"Repeating Pattern", "random":"Random", "lerp":"Linear Interpolation", "slope":"Slope Formula", "ellipse":"Ellipse Formula"},
-                    "default_value": "normal"
+                    "default_value": "normal",
+                    "enabled": "effect_type == 'effect'"
                 },
-                "f_trigger":
+                "rate_modifier":
                 {
                     "label": "Rate Modifier Type",
                     "description": "How often the print shifts. ::Normal: Uses the change rate.  ::Random: picks a number of layers between the set change_rate and change_rate*2",
                     "type": "enum",
                     "options": {"normal":"Normal", "random":"Random"},
-                    "default_value": "normal"
+                    "default_value": "normal",
+                    "enabled": "effect_type == 'effect'"
                 },
                 "lerp_i":
                 {
@@ -209,7 +261,7 @@ class Melt(Script):
                     "maximum_value": "1",
                     "minimum_value_warning": "-0.9",
                     "maximum_value_warning": "0.9",
-                    "enabled": "e_trigger == 'lerp'"
+                    "enabled": "e_trigger == 'lerp' and effect_type == 'effect'"
                 },
                 "slope_m":
                 {
@@ -221,7 +273,7 @@ class Melt(Script):
                     "maximum_value": "0",
                     "minimum_value_warning": "-25",
                     "maximum_value_warning": "0.1",
-                    "enabled": "e_trigger == 'slope'"
+                    "enabled": "e_trigger == 'slope' and effect_type == 'effect'"
                 },
                 "slope_i":
                 {
@@ -233,7 +285,7 @@ class Melt(Script):
                     "maximum_value": "2",
                     "minimum_value_warning": "0.1",
                     "maximum_value_warning": "1.9",
-                    "enabled": "e_trigger == 'slope'"
+                    "enabled": "e_trigger == 'slope' and effect_type == 'effect'"
                 },
                 "pattern":
                 {
@@ -241,9 +293,9 @@ class Melt(Script):
                     "description": "Set a repeating pattern of extruder values between 0 and 1.",
                     "type": "str",
                     "default_value": "0.5,1,0.25,0.75,0.5,0",
-                    "enabled": "e_trigger == 'pattern'"
+                    "enabled": "e_trigger == 'pattern' and effect_type == 'effect'"
                 },
-                "e1_trigger":
+                "expert":
                 {
                     "label": "Expert Controls",
                     "description": "Enable more controls. Some of which are for debugging purposes and may change or be removed later",
@@ -253,10 +305,10 @@ class Melt(Script):
                 "enable_initial":
                 {
                     "label": "Enable Initial Setup",
-                    "description": "If your extruder setup isn't already set in the duet’s sd card settings.",
+                    "description": "If your extruder setup isn't set in the duet’s sd card settings.",
                     "type": "bool",
                     "default_value": false,
-                    "enabled": "e1_trigger"
+                    "enabled": "expert"
                 },
                 "initial_a":
                 {
@@ -297,102 +349,61 @@ class Melt(Script):
                     "type": "str",
                     "default_value": "",
                     "enabled": "enable_initial"
-                },
-                "initial_flow":
-                {
-                    "label": "Initial Main Flow",
-                    "description": "Flow to initially set extruders must total up to 1.000  ::This allows the extruder to be set for any portion of the print before the actual shift begins.",
-                    "unit": "0-1",
-                    "type": "str",
-                    "default_value": "1,0,0,0",
-                    "enabled": "e1_trigger"
-                },
-                "final_flow":
-                {
-                    "label": "Final Main Flow",
-                    "description": "Flow to initially set extruders must total up to 1.000  ::This allows the extruder to be set for any portion of the print after the affected layers.",
-                    "unit": "0-1",
-                    "type": "str",
-                    "default_value": "0,0,0,1",
-                    "enabled": "e1_trigger"
-                },
-                "flow_adjust":
-                {
-                    "label": "Ext Flow Adjust",
-                    "description": "This compensates for under or over extrusion due to variances in filament",
-                    "unit": "% + -",
-                    "type": "float",
-                    "default_value": 0,
-                    "minimum_value": "-20",
-                    "maximum_value": "20",
-                    "minimum_value_warning": "-5",
-                    "maximum_value_warning": "5",
-                    "enabled": "e1_trigger"
-                },
-                "flow_min":
-                {
-                    "label": "Minimum Flow Allowed",
-                    "description": "Clamp to keep both extruders flowing a small amount to prevent clogs. 0% to 5% Normally",
-                    "unit": "%",
-                    "type": "float",
-                    "default_value": 0,
-                    "minimum_value": "0",
-                    "maximum_value": "10",
-                    "minimum_value_warning": "0",
-                    "maximum_value_warning": "5",
-                    "enabled": "e1_trigger"
                 }
             }
         }"""
 
-    def execute(self, data: list):  # used to be data: list
-        # Set user settings from cura
-        clamp_choice = self.getSettingValueByKey("a_trigger")
-        direction = self.getSettingValueByKey("b_trigger")
 
-        # EVENTUALLY USED TO MAKE THE EXTRUDER LOOP BACK TO THE FIRST EXTRUDER
-        loop = self.getSettingValueByKey("c_trigger")  # linear or circular (not currently enabled)
+    def execute(self, data: list):
 
-        modifier = self.getSettingValueByKey("e_trigger")  # normal, wood, pattern
-        rate_modifier = self.getSettingValueByKey("f_trigger")  # normal, random
-        change_rate = int(self.getSettingValueByKey("change_rate"))
-        initial_flows = [float(initial_flow) for initial_flow in self.getSettingValueByKey("initial_flow").strip().split(',')]
-        final_flows = [float(final_flow) for final_flow in self.getSettingValueByKey("final_flow").strip().split(',')]
-        flow_adjust = float((self.getSettingValueByKey("flow_adjust")) / 100) + 1  # convert user input into multi
+        # Load all the settings
+        firmware_type = str(self.getSettingValueByKey("firmware_type"))
         qty_extruders = int(self.getSettingValueByKey("qty_extruders"))
-        flow_min = float(self.getSettingValueByKey("flow_min") / 100) * qty_extruders
-        flow_clamp_adjust = float(1 - (flow_min * qty_extruders))
+        affected_tool = int(self.getSettingValueByKey("affected_tool"))
+        effect_type = str(self.getSettingValueByKey("effect_type"))
+        unit_type = str(self.getSettingValueByKey("unit_type"))
+        percent_change_start = float(self.getSettingValueByKey("percent_change_start") / 100)
+        percent_change_end = float(self.getSettingValueByKey("percent_change_end") / 100)
+        layer_change_start = int(self.getSettingValueByKey("layer_change_start"))
+        layer_change_end = int(self.getSettingValueByKey("layer_change_end"))
+        blend_values = [float(blend_values) for blend_values in self.getSettingValueByKey("blend_values").strip().split(',')]
+        rotation_order = str(self.getSettingValueByKey("rotation_order"))
+        extruder_a_start = float(self.getSettingValueByKey("extruder_a_start"))
+        extruder_a_end = float(self.getSettingValueByKey("extruder_a_end"))
+        extruder_b_start = float(self.getSettingValueByKey("extruder_b_start"))
+        extruder_b_end = float(self.getSettingValueByKey("extruder_b_end"))
+        extruder_c_start = float(self.getSettingValueByKey("extruder_c_start"))
+        extruder_c_end = float(self.getSettingValueByKey("extruder_c_end"))
+        extruder_d_start = float(self.getSettingValueByKey("extruder_d_start"))
+        extruder_d_end = float(self.getSettingValueByKey("extruder_d_end"))
+        change_rate = int(self.getSettingValueByKey("change_rate"))
+        loop_type = str(self.getSettingValueByKey("loop_type"))
+        effect_modifier = str(self.getSettingValueByKey("effect_modifier"))
+        rate_modifier = str(self.getSettingValueByKey("rate_modifier"))
+        lerp_i = float(self.getSettingValueByKey("lerp_i"))
+        slope_m = float(self.getSettingValueByKey("slope_m"))
+        slope_i = float(self.getSettingValueByKey("slope_i"))
         pattern = [float(pattern) for pattern in self.getSettingValueByKey("pattern").strip().split(',')]
-        lerp_i = self.getSettingValueByKey("lerp_i")
-        slope_m = self.getSettingValueByKey("slope_m")
-        slope_i = self.getSettingValueByKey("slope_i")
+        enable_initial = bool(self.getSettingValueByKey("enable_initial"))
+        initial_a = str(self.getSettingValueByKey("initial_a"))
+        initial_b = str(self.getSettingValueByKey("initial_b"))
+        initial_c = str(self.getSettingValueByKey("initial_c"))
+        initial_d = str(self.getSettingValueByKey("initial_d"))
+        initial_e = str(self.getSettingValueByKey("initial_e"))
 
-        enable_initial = self.getSettingValueByKey("enable_initial")
-        initial_a = self.getSettingValueByKey("initial_a")
-        initial_b = self.getSettingValueByKey("initial_b")
-        initial_c = self.getSettingValueByKey("initial_c")
-        initial_d = self.getSettingValueByKey("initial_d")
-        initial_e = self.getSettingValueByKey("initial_e")
-
-        # INITIATE EXTRUDERS AS ZERO EXCEPT FIRST ONE
-        base_input = [0] * qty_extruders
-        base_input[0] = 1
-
-        # CHECK ORDER OF VALUES ENTERED BY USER
-        percent_start = float(self.getSettingValueByKey("percent_change_start") / 100)
-        percent_end = float(self.getSettingValueByKey("percent_change_end") / 100)
-        layer_start = int(self.getSettingValueByKey("layer_change_start"))
-        layer_end = int(self.getSettingValueByKey("layer_change_end"))
-        # REORDER IF BACKWARDS
-        if percent_end < percent_start:
-            percent_start, percent_end = percent_end, percent_start
-        if layer_end < layer_start:
-            layer_start, layer_end = layer_end, layer_start
 
         current_position = 0
         end_position = 0
         index = 0
         has_been_run = 0
+
+        #miso initialize
+        tool = 0
+        zpos = 0
+        relative = False
+        toolHistory = tool
+        zposHistory = zpos
+        relativeHistory = relative
 
         # Iterate through the layers
         for active_layer in data:
@@ -402,166 +413,36 @@ class Melt(Script):
 
             modified_gcode = ""
             for line in lines:
-                if ";Modified:" in line:
-                    has_been_run = 1
-                elif ";LAYER_COUNT:" in line:
+                if ";LAYER_COUNT:" in line:
                     # FINDING THE ACTUAL AFFECTED LAYERS
                     total_layers = float(line[(line.index(':') + 1): len(line)])
 
                     # Calculate positions based on total_layers
-                    if clamp_choice == 'percent':
-                        start_position = int(int(total_layers) * float(percent_start))
-                        current_position = start_position
-                        end_position = int(int(total_layers) * float(percent_end))
-                    if clamp_choice == 'layer_no':
-                        start_position = int(clamp(layer_start, 0, total_layers))
-                        current_position = start_position
-                        end_position = int(clamp(layer_end, 0, total_layers))
-
-                    # how many layers are affected
-                    adjusted_layers = end_position - start_position
-
-                    # Make sure the change_rate doesnt sit outside of allowed values
-                    change_rate = int(clamp(change_rate, 0, adjusted_layers))
-
-                    # SETTING THE FLOWS SET BY USER IN EXPERT CONTROLS
-                    while len(initial_flows) < len(base_input):  # Ensure at least as many are set as needed
-                        initial_flows.append(float(0))
-                    total_value = 0
-                    i = 0
-                    for ext in base_input:  # Disregard extras
-                        initial_flows[i] = clamp(initial_flows[i], 0, 1)  # Clamp to value range
-                        if i == len(base_input)-1 and total_value < 1:  # Make the last one add up to 1
-                            base_input[i] = 1 - total_value
-                        elif initial_flows[i] + total_value < 1:  # Keep within total of 1
-                            base_input[i] = initial_flows[i]
-                        else:
-                            base_input[i] = 1 - total_value
-                        total_value += base_input[i]
-                        i += 1
-
-                    # ASSIGN THE INITIAL VALUES TO A SINGLE GCODE LINE
-                    ext_gcode_list = [''] * qty_extruders
-                    gcode_index = 0
-                    for code in ext_gcode_list:
-                        ext_gcode_list[ext_gcode_list.index(code)] = format(base_input[gcode_index] * flow_adjust * flow_clamp_adjust + flow_min, '.3f')
-                        gcode_index += 1
+                    if unit_type == 'percent':
+                        start_position = int(int(total_layers) * float(percent_change_start))
+                        end_position = int(int(total_layers) * float(percent_change_end))
+                    # Clamp within range
+                    if unit_type == 'layer_no':
+                        start_position = int(clamp(layer_change_start, 0, total_layers))
+                        end_position = int(clamp(layer_change_end, 0, total_layers))
 
                     modified_gcode += line  # list the initial line info
 
-                    if has_been_run == 0:
-                        if enable_initial:
-                            modified_gcode += initiate_extruder("", initial_a, initial_b, initial_c, initial_d, initial_e)
-                        if direction == 'normal':
-                            modified_gcode += adjust_extruder_rate("", *ext_gcode_list)
-                        else:
-                            modified_gcode += adjust_extruder_rate("", *ext_gcode_list[::-1])
-
-                    # DEBUG FOR USER REPORTING
-                    modified_gcode += print_debug("Version:", self.version)
-                    modified_gcode += print_debug("Clamp_choice:", clamp_choice, "  Direction:", direction)
-                    modified_gcode += print_debug("Modifier:", modifier, "  Rate Modifier:", rate_modifier)
-                    modified_gcode += print_debug("Pattern:", pattern)
-                    modified_gcode += print_debug("Change_rate:", change_rate, "  Initial_flows:", initial_flows, "  Final_flows", final_flows)
-                    modified_gcode += print_debug("Qty_extruders:", qty_extruders, "  Flow_min:", flow_min)
-                    modified_gcode += print_debug("Percent_start:", percent_start, "  Percent_end:", percent_end)
-                    modified_gcode += print_debug("Layer_start:", layer_start, "  Layer_end:", layer_end)
-
-
-                    # INITIATE VALUES USED THROUGH THE AFFECTED LAYERS
-                    if change_rate != 0:
-                        changes_total = int(adjusted_layers/change_rate)  # how many times are we allowed to adjust
-                    else:
-                        changes_total = 0
-
-                    #changes_per_extruder = int(changes_total/(qty_extruders-1))
-                    changes_per_extruder = int(changes_total/(qty_extruders-int(loop)))
-                    current_extruder = 0
-                    next_extruder = 1
-                    ext_fraction = changes_per_extruder
-
                 # CHANGES MADE TO LAYERS THROUGH THE AFFECTED LAYERS
-                elif ";LAYER:" + str(current_position) in line and int(current_position) < int(end_position):
-
-                    # ADJUST EXTRUDER RATES FOR NEXT AFFECTED LAYER 2 PARTS (should be simplified)
-                    # Part 1 adjust rate by fraction to avoid rounding errors from addition
-                    if modifier == 'normal':
-                        base_input[current_extruder], base_input[next_extruder] = standard_shift(ext_fraction, changes_per_extruder)
-                    elif modifier == 'wood':
-                        base_input[current_extruder], base_input[next_extruder] = wood_shift(0.05, 0.25)
-                    elif modifier == 'pattern':
-                        base_input[current_extruder], base_input[next_extruder] = pattern_shift(pattern)
-                    elif modifier == 'random':
-                        base_input[current_extruder], base_input[next_extruder] = random_shift()
-                    elif modifier == 'lerp':
-                        base_input[current_extruder], base_input[next_extruder] = lerp_shift(0, changes_per_extruder, ext_fraction/changes_per_extruder, lerp_i)
-                    elif modifier == 'slope':
-                        base_input[current_extruder], base_input[next_extruder] = lerp_shift(ext_fraction, changes_per_extruder, slope_m, slope_i)
-                    elif modifier == 'ellipse':
-                        base_input[current_extruder], base_input[next_extruder] = ellipse_shift(ext_fraction/changes_per_extruder)
-
-                    # Part 2 initialize what percentage to reach wrap extruders back to start if out of range
-                    ext_fraction -= 1
-                    if ext_fraction < 0:
-                        current_extruder += 1
-                        next_extruder += 1
-                        ext_fraction = changes_per_extruder-1  # -1 to avoid duplicate 0:1:0
-                    if next_extruder == qty_extruders:
-                        next_extruder = 0
-
-                    # lAST TWEAK ADJUST THE EXTRUDER VALUES BY FLOW ADJUSTMENTS AND LIMITS
-                    ext_gcode_list = [''] * qty_extruders
-                    gcode_index = 0
-                    for ext in ext_gcode_list:
-                        ext_gcode_list[ext_gcode_list.index(ext)] = format(base_input[gcode_index] * flow_adjust * flow_clamp_adjust + flow_min, '.3f')
-                        gcode_index += 1
-
-                    # TURN THE EXTRUDER VALUES INTO A SINGLE GCODE LINE
-                    if direction == 'normal':
-                        modified_gcode += adjust_extruder_rate(line, *ext_gcode_list)
-                    else:
-                        modified_gcode += adjust_extruder_rate(line, *ext_gcode_list[::-1])
-
-                    # CHANGE THE POSITION FOR NEXT RUN
-                    if rate_modifier == 'normal':
-                        current_position += standard_rate(change_rate)
-                    elif rate_modifier == 'random':
-                        current_position += random_rate(change_rate, change_rate*2)
-
-                # CHANGES MADE AFTER THE LAST AFFECTED LAYER TO COMPLETE THE PRINT WITH
-                elif ";LAYER:" + str(end_position) in line:  # Runs last and only runs once
-                    # SETTING THE FLOWS SET BY USER IN EXPERT CONTROLS
-                    while len(final_flows) < len(base_input):  # Ensure at least as many are set as needed
-                        final_flows.append(float(0))
-                    total_value = 0
-                    i = 0
-                    for ext in base_input:  # Disregard extras
-                        final_flows[i] = clamp(final_flows[i], 0, 1)  # Clamp to value range
-                        if i == len(base_input) - 1 and total_value < 1:  # Make the last one add up to 1
-                            base_input[i] = 1 - total_value
-                        elif final_flows[i] + total_value < 1:  # Keep within total of 1
-                            base_input[i] = final_flows[i]
-                        else:
-                            base_input[i] = 1 - total_value
-                        total_value += base_input[i]
-                        i += 1
-
-                    # ASSIGN THE INITIAL VALUES TO A SINGLE GCODE LINE
-                    ext_gcode_list = [''] * qty_extruders
-                    gcode_index = 0
-                    for code in ext_gcode_list:
-                        ext_gcode_list[ext_gcode_list.index(code)] = format(base_input[gcode_index] * flow_adjust * flow_clamp_adjust + flow_min, '.3f')
-                        gcode_index += 1
-
-                    # change direction of shift if set by user
-                    if direction == 'normal':
-                        modified_gcode += adjust_extruder_rate(line, *ext_gcode_list)
-                    else:
-                        modified_gcode += adjust_extruder_rate(line, *ext_gcode_list[::-1])
-
-                # LEAVE ALL OTHER LINES ALONE SINCE THEY ARE NOT NEW LAYERS
                 else:
-                    modified_gcode += line + "\n"
+
+                    tool = Miso.Gcode.updateTool(line, tool)
+                    #zpos = Miso.Gcode.updateZ(line, zpos, relative)
+                    relative = Miso.Gcode.updateRelative(line, relative)
+
+                    isDirty = tool != toolHistory or zpos != zposHistory or relative != relativeHistory
+                    if isDirty and Miso.Gcode.isExtrude(line):
+                        toolHistory = tool
+                        zposHistory = zpos
+                        relativeHistory = relative
+
+                        modified_gcode += Miso.Gcode.formatMix(tool, zpos, total_layers) + "\n"
+                    modified_gcode += line + " tool " + str(tool) + " zpos " + str(zpos) + " relative " + str(relative) + "\n"
 
             # REPLACE THE DATA
             data[index] = modified_gcode
@@ -621,6 +502,128 @@ def random_rate(min_percentage, max_percentage):
     random_value = int(random.uniform(min_percentage, max_percentage))
     return random_value
 
+class Miso:
+    # Hash of ToolConfigurations
+    # Allows extruder mixes to be assigned to different tools
+    _toolConfigs = {}
+
+    @staticmethod
+    def setToolConfig(toolId, toolConfig):
+        Miso._toolConfigs[toolId] = toolConfig
+
+    @staticmethod
+    def getToolConfig(toolId):
+        if toolId in Miso._toolConfigs:
+            return Miso._toolConfigs[toolId]
+        return Miso.Tool() #default
 
 
+    # Miso.Tool
+    # Mix and gradient information for a specific tool
+    # Example:
+    #   toolConfig = Miso.Tool([mix1, mix2, ...])
+    class Tool:
+        def __init__(self, stops=None):
+            stops = stops or [Miso.Mix()]
+            self.stops = {}
+            for stop in stops:
+                self.stops[stop.zstop] = stop.mix
+
+    # Miso.Mix
+    # Mix information for a single stop (layer)
+    # Z is expressed in percentage (0 to 1)
+    # extruders is an array of percentages (0 to 1)
+    class Mix:
+        def __init__(self, mix=[1], zstop=0):
+            self.mix = mix
+            self.zstop = zstop
+
+    # Miso.Gcode
+    # Methods that help read and generate gcode
+    class Gcode:
+        _movecodes = re.compile('^\\s*(G0|G1).+Z(?P<distance>\\d+)\\b')
+        _extrudecodes = re.compile('^\\s*(G0|G1|G2|G3).+(E|F)\\d+\\b')
+        _toolcodes = re.compile('^\\s*T(?P<toolid>\\d+)\\b')
+        _absolutecodes = re.compile('^\\s*G91\\b')
+        _relativecodes = re.compile('^\\s*G90\\b')
+
+        @staticmethod
+        def updateRelative(line, current):
+            if Miso.Gcode._relativecodes.match(line):
+                return True
+            if Miso.Gcode._absolutecodes.match(line):
+                return False
+            return current
+
+        @staticmethod
+        def updateTool(line, current):
+            match = Miso.Gcode._toolcodes.search(line)
+            if match:
+                return int(match.group('toolid'))
+            return current
+
+        @staticmethod
+        def updateZ(line, current, relative):
+            match = Miso.Gcode._movecodes.search(line)
+            if match and relative:
+                change = float(match.group('distance'))
+                return current + change
+            if match:
+                return float(match.group('distance'))
+            return current
+
+        @staticmethod
+        def isExtrude(line):
+            return Miso.Gcode._extrudecodes.match(line)
+
+        @staticmethod
+        def formatMix(tool, zpos, zmax):
+            index = zpos / zmax
+            mix = Miso.Gcode._calcMix(index, tool)
+            for i in range(len(mix)):
+                mix[i] = Miso.Gcode._formatNumber(mix[i])
+            return 'M567 P' + str(tool) + ' E' + ':'.join(mix)
+
+        @staticmethod
+        def _calcMix(index, tool):
+            segment = Miso.Gcode._calcSegment(index, tool)
+            srange = segment.keys()
+            if len(srange) == 0:
+                return [1]
+            if len(srange) == 1:
+                return segment[srange[0]]
+            index = (index - min(srange[0], srange[1])) / (max(srange[0], srange[1])-min(srange[0], srange[1]))
+            mix = []
+            start = segment[min(srange[0], srange[1])]
+            end = segment[max(srange[0], srange[1])]
+            for extruder in range(max(len(start), len(end))):
+                svalue = len(start) < extruder and start[extruder] or 0
+                evalue = len(end) < extruder and end[extruder] or 0
+                mix.append((evalue - svalue) * index + svalue)
+            return mix
+
+        @staticmethod
+        def _calcSegment(index, tool):  # NOTE: this will allow mixes that total more than 1
+            stops = Miso.getToolConfig(tool).stops
+            start = None
+            end = None
+            for stop in stops.keys():  # TODO: If stop is 0 there will be a bug
+                start = stop <= index and (start != None and max(start, stop) or stop) or start
+                end = stop >= index and (end != None and max(end, stop) or stop) or end
+            segment = {}
+            if start:
+                segment[start] = stops[start]
+            if end:
+                segment[end] = stops[end]
+            return segment
+
+        @staticmethod
+        def _formatNumber(value):
+            value = str(value).strip()
+            if re.match('^\\.', value):
+                value = '0' + value
+            filter = re.search('\\d+(\\.\\d{1,2})?', value)
+            if not filter:
+                return '0'
+            return filter.string[filter.start():filter.end()]
 
